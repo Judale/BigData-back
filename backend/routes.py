@@ -5,6 +5,7 @@ from backend.fake_model import predict
 from backend.utils import generate_token, token_required
 from werkzeug.security import generate_password_hash, check_password_hash
 import random
+from backend.model_inference import predict
 
 api = Blueprint("api", __name__)
 
@@ -34,8 +35,16 @@ def login():
 @token_required
 def start_game(user_id):
     word_list = [
-        ("cat", "animal"), ("bicycle", "transport"),
-        ("banana", "fruit"), ("tree", "nature"), ("book", "object")
+        ("airplane", "transport"),
+        ("angel", "personnage"),
+        ("apple", "fruit"),
+        ("axe", "outil"),
+        ("banana", "fruit"),
+        ("bridge", "construction"),
+        ("cup", "objet"),
+        ("donut", "nourriture"),
+        ("door", "objet"),
+        ("mountain", "nature"),
     ]
     word, category = random.choice(word_list)
     game = Game(user_id=user_id, word=word, category=category)
@@ -56,47 +65,39 @@ def submit_drawing(user_id):
     if not game or game.user_id != user_id:
         return jsonify({"error": "Partie introuvable ou non autorisée"}), 403
 
-    ndjson_data = data["ndjson"]
-    if isinstance(ndjson_data, dict) and "drawing" in ndjson_data:
-        drawing_data = ndjson_data["drawing"]
+    ndjson = data["ndjson"]
+    if isinstance(ndjson, dict) and "drawing" in ndjson:
+        drawing = ndjson["drawing"]
     else:
         return jsonify({"error": "Format NDJSON invalide"}), 400
 
     is_final = data.get("is_final", False)
-    drawing = Drawing(game_id=game.id, ndjson=ndjson_data, is_final=is_final)
-    db.session.add(drawing)
+    db.session.add(Drawing(game_id=game.id, ndjson=ndjson, is_final=is_final))
     db.session.commit()
 
-    label, proba = predict(drawing_data)
+    # --- INFÉRENCE RÉELLE ---------------------------------------------------
+    label, proba = predict(drawing)                # ← utilisation directe
+    # -----------------------------------------------------------------------
 
-    if label == game.word and proba >= 0.9:
+    if label == game.word and proba >= 0.90:
         elapsed = data.get("elapsed_time", 30)
-        if elapsed <= 5:
-            score = 100
-        elif elapsed <= 10:
-            score = 80
-        elif elapsed <= 15:
-            score = 60
-        elif elapsed <= 20:
-            score = 40
-        elif elapsed <= 25:
-            score = 20
-        else:
-            score = 10
+        if   elapsed <= 5:  score = 100
+        elif elapsed <= 10: score = 80
+        elif elapsed <= 15: score = 60
+        elif elapsed <= 20: score = 40
+        elif elapsed <= 25: score = 20
+        else:               score = 10
+
         game.score = score
         db.session.commit()
-        return jsonify({
-            "status": "recognized",
-            "label": label,
-            "proba": round(proba, 2),
-            "score": score
-        })
+        return jsonify({"status": "recognized",
+                        "label": label,
+                        "proba": round(proba, 2),
+                        "score": score})
 
-    return jsonify({
-        "status": "pending",
-        "label": label,
-        "proba": round(proba, 2)
-    })
+    return jsonify({"status": "pending",
+                    "label": label,
+                    "proba": round(proba, 2)})
 
 @api.route("/drawing-view", methods=["POST"])
 def drawing_view():
