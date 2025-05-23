@@ -91,8 +91,8 @@ CLASSES = [
     "airplane", "angel", "apple", "axe", "banana",
     "bridge", "cup", "donut", "door", "mountain"
 ]
-WEIGHTS = Path("backend/quickdraw_cnn.pth")   # mettez ici le vrai chemin
-
+WEIGHTS = Path("backend/modele/prod/quickdraw_cnn.pth")
+WEIGHTS_60_class = Path("backend/modele/prod/quickdraw_cnn_60_class.pth")
 
 @lru_cache(maxsize=1)
 def _get_model():
