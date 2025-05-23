@@ -1,16 +1,25 @@
 from flask import Flask
-from backend.routes import api
 from flask_cors import CORS
-from backend.database import init_db
+from backend.database import db, migrate
+from backend.routes import api_blueprint
 
-app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///quickdraw.db"
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+def create_app():
+    app = Flask(__name__, instance_relative_config=True)
+    app.config.from_mapping(
+        SQLALCHEMY_DATABASE_URI="sqlite:///../instance/quickdraw.db",
+        SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        SECRET_KEY="change-me-in-prod",
+    )
 
-CORS(app)
+    # Extensions
+    db.init_app(app)
+    migrate.init_app(app, db)
+    CORS(app, supports_credentials=True)
 
-init_db(app)
-app.register_blueprint(api)
+    # Blueprints
+    app.register_blueprint(api_blueprint, url_prefix="/api")
+
+    return app
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    create_app().run(debug=True)

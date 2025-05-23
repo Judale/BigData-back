@@ -1,28 +1,49 @@
-from flask import Blueprint, request, jsonify, render_template_string
-from backend.database import db
-from backend.models import User, Game, Drawing
-from backend.fake_model import predict
-from backend.utils import generate_token, token_required
-from werkzeug.security import generate_password_hash, check_password_hash
+from collections import Counter
+from datetime import datetime
 import random
+
+from flask import Blueprint, request, jsonify, render_template_string
+from sqlalchemy.sql import func
+
+from backend.database import db
+from backend.models import (
+    User,
+    Game,
+    Drawing,
+    Mode,
+    Word,
+    Category,
+    Difficulty,
+    Round,
+    Score,
+)
 from backend.model_inference import predict
+from backend.utils import generate_token, token_required, compute_score
+from werkzeug.security import generate_password_hash, check_password_hash
 
-api = Blueprint("api", __name__)
+# ─────────────────────────────
+# Blueprint
+# ─────────────────────────────
+api_blueprint = Blueprint("api", __name__)
 
-@api.route("/register", methods=["POST"])
+# ---------------------------------
+# Auth routes
+# ---------------------------------
+@api_blueprint.route("/register", methods=["POST"])
 def register():
     data = request.get_json()
     if User.query.filter_by(username=data["username"]).first():
         return jsonify({"error": "Username already exists"}), 400
     user = User(
         username=data["username"],
-        password_hash=generate_password_hash(data["password"], method="pbkdf2:sha256")
+        password_hash=generate_password_hash(data["password"], method="pbkdf2:sha256"),
     )
     db.session.add(user)
     db.session.commit()
     return jsonify({"message": "User created"}), 201
 
-@api.route("/login", methods=["POST"])
+
+@api_blueprint.route("/login", methods=["POST"])
 def login():
     data = request.get_json()
     user = User.query.filter_by(username=data["username"]).first()
@@ -31,78 +52,142 @@ def login():
         return jsonify({"token": token, "user_id": user.id})
     return jsonify({"error": "Invalid credentials"}), 401
 
-@api.route("/start-game", methods=["POST"])
+# ---------------------------------
+# Helpers
+# ---------------------------------
+
+def _select_words(mode: Mode, length: int, categories: list[str]) -> list[Word]:
+    """Sélectionne les `Word` à deviner selon le mode."""
+    if mode == Mode.SINGLE:
+        if not categories:
+            raise ValueError("categories required for single mode")
+        cat = Category.query.filter_by(name=categories[0]).first_or_404()
+        return random.sample(cat.words, min(length, len(cat.words)))
+
+    if mode == Mode.MULTI:
+        if not categories:
+            raise ValueError("categories required for multi mode")
+        words: list[Word] = []
+        per_cat = max(1, length // len(categories))
+        for cname in categories:
+            cat = Category.query.filter_by(name=cname).first_or_404()
+            words.extend(random.sample(cat.words, min(per_cat, len(cat.words))))
+        pool = Word.query.join(Category).filter(Category.name.in_(categories)).all()
+        while len(words) < length:
+            words.append(random.choice(pool))
+        return random.sample(words, length)
+
+    if mode in (Mode.ALL, Mode.VERSUS):
+        return random.sample(Word.query.all(), length)
+
+    raise ValueError("unknown mode")
+
+# ---------------------------------
+# Game lifecycle
+# ---------------------------------
+
+@api_blueprint.route("/start-game", methods=["POST"])
 @token_required
-def start_game(user_id):
-    word_list = [
-        ("airplane", "transport"),
-        ("angel", "personnage"),
-        ("apple", "fruit"),
-        ("axe", "outil"),
-        ("banana", "fruit"),
-        ("bridge", "construction"),
-        ("cup", "objet"),
-        ("donut", "nourriture"),
-        ("door", "objet"),
-        ("mountain", "nature"),
-    ]
-    word, category = random.choice(word_list)
-    game = Game(user_id=user_id, word=word, category=category)
+def start_game(user_id):  # Le token donne user_id
+    data = request.get_json(force=True)
+    length = int(data.get("length", 5))
+    difficulty = Difficulty(data.get("difficulty", "easy"))
+    mode = Mode(data.get("mode", "single"))
+    categories = data.get("categories", [])
+    opponent_id = data.get("opponent_id")
+
+    game = Game(
+        creator_id=user_id,
+        opponent_id=opponent_id,
+        length=length,
+        difficulty=difficulty,
+        mode=mode,
+    )
     db.session.add(game)
+    db.session.flush()
+
+    try:
+        words = _select_words(mode, length, categories)
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 400
+
+    for idx, w in enumerate(words):
+        db.session.add(Round(game_id=game.id, word_id=w.id, order_idx=idx))
+
     db.session.commit()
+
+    first_round = Round.query.filter_by(game_id=game.id, order_idx=0).first()
+    return (
+        jsonify(
+            {
+                "game_id": game.id,
+                "round_id": first_round.id,
+                "word": Word.query.get(first_round.word_id).text,
+            }
+        ),
+        201,
+    )
+
+
+@api_blueprint.route("/next-word/<int:game_id>/<int:current_idx>")
+def next_word(game_id: int, current_idx: int):
+    rnd = Round.query.filter_by(game_id=game_id, order_idx=current_idx + 1).first()
+    if not rnd:
+        return jsonify({"word": None})
     return jsonify({
-        "game_id": game.id,
-        "word": word,
-        "category": category
+        "round_id": rnd.id,
+        "word": Word.query.get(rnd.word_id).text,
     })
 
-@api.route("/submit-drawing", methods=["POST"])
-@token_required
-def submit_drawing(user_id):
-    data = request.get_json()
-    game = Game.query.get(data["game_id"])
 
-    if not game or game.user_id != user_id:
-        return jsonify({"error": "Partie introuvable ou non autorisée"}), 403
+@api_blueprint.route("/submit-drawing", methods=["POST"])
+def submit_drawing():
+    data = request.get_json(force=True)
+    round_id = data["round_id"]
+    elapsed = float(data["elapsed_time"])
+    drawing = data["ndjson"]  # strokes only
 
-    ndjson = data["ndjson"]
-    if isinstance(ndjson, dict) and "drawing" in ndjson:
-        drawing = ndjson["drawing"]
-    else:
-        return jsonify({"error": "Format NDJSON invalide"}), 400
+    rnd = Round.query.get_or_404(round_id)
+    game = Game.query.get(rnd.game_id)
 
-    is_final = data.get("is_final", False)
-    db.session.add(Drawing(game_id=game.id, ndjson=ndjson, is_final=is_final))
-    db.session.commit()
+    db.session.add(Drawing(round_id=rnd.id, ndjson=drawing, is_final=True))
 
-    # --- INFÉRENCE RÉELLE ---------------------------------------------------
-    label, proba = predict(drawing)                # ← utilisation directe
-    # -----------------------------------------------------------------------
+    label, proba = predict(drawing["drawing"])
+    target_word = Word.query.get(rnd.word_id).text
 
-    if label == game.word and proba >= 0.90:
-        elapsed = data.get("elapsed_time", 30)
-        if   elapsed <= 5:  score = 100
-        elif elapsed <= 10: score = 80
-        elif elapsed <= 15: score = 60
-        elif elapsed <= 20: score = 40
-        elif elapsed <= 25: score = 20
-        else:               score = 10
-
-        game.score = score
+    if label == target_word:
+        sc = compute_score(elapsed, game.difficulty.value)
+        rnd.time_taken = elapsed
+        rnd.score = sc
         db.session.commit()
-        return jsonify({"status": "recognized",
-                        "label": label,
-                        "proba": round(proba, 2),
-                        "score": score})
+        return jsonify({"status": "recognized", "score": sc})
 
-    return jsonify({"status": "pending",
-                    "label": label,
-                    "proba": round(proba, 2)})
+    db.session.commit()
+    return jsonify({"status": "pending", "label": label, "proba": round(proba, 2)})
 
-@api.route("/drawing-view", methods=["POST"])
+
+@api_blueprint.route("/finish-game/<int:game_id>", methods=["POST"])
+def finish_game(game_id: int):
+    game = Game.query.get_or_404(game_id)
+    total = (
+        db.session.query(func.sum(Round.score)).filter_by(game_id=game.id).scalar() or 0
+    )
+
+    user_id = request.headers.get("X-User-ID", type=int) or game.creator_id
+    db.session.add(Score(game_id=game.id, user_id=user_id, total_points=total))
+
+    game.finished_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({"total_points": total})
+
+# ---------------------------------
+# Debug : visualiser un dessin
+# ---------------------------------
+@api_blueprint.route("/drawing-view", methods=["POST"])
 def drawing_view():
     data = request.get_json()
-    strokes = []
+    strokes: list = []
 
     if "drawing_id" in data:
         drawing = Drawing.query.get(data["drawing_id"])
@@ -111,9 +196,11 @@ def drawing_view():
         strokes = drawing.ndjson.get("drawing", [])
 
     elif "game_id" in data:
-        drawings = Drawing.query.filter_by(game_id=data["game_id"]).all()
-        for d in drawings:
-            strokes.extend(d.ndjson.get("drawing", []))
+        rounds = Round.query.filter_by(game_id=data["game_id"]).all()
+        for r in rounds:
+            fin = Drawing.query.filter_by(round_id=r.id, is_final=True).first()
+            if fin:
+                strokes.extend(fin.ndjson.get("drawing", []))
 
     elif "drawing" in data:
         strokes = data["drawing"]
@@ -127,7 +214,7 @@ def drawing_view():
         path = "M " + " L ".join([f"{x[i]},{y[i]}" for i in range(len(x))])
         svg_paths += f'<path d="{path}" stroke="black" fill="none" stroke-width="2"/>' + "\n"
 
-    html = f'''
+    html = f"""
     <!DOCTYPE html>
     <html>
     <head><title>Dessin NDJSON</title></head>
@@ -138,52 +225,130 @@ def drawing_view():
         </svg>
     </body>
     </html>
-    '''
+    """
     return render_template_string(html)
 
-@api.route("/profile/me", methods=["GET"])
+# ---------------------------------
+# Profil / scores
+# ---------------------------------
+@api_blueprint.route("/profile/me", methods=["GET"])
 @token_required
 def profile_me(user_id):
-    games = Game.query.filter_by(user_id=user_id).all()
-    total_games = len(games)
-    total_score = sum(game.score or 0 for game in games)
-    best_score = max((game.score or 0 for game in games), default=0)
+    scores = Score.query.filter_by(user_id=user_id).all()
+    total_games = len(scores)
+    total_score = sum(s.total_points for s in scores)
+    best_score = max((s.total_points for s in scores), default=0)
 
-    return jsonify({
-        "total_games": total_games,
-        "total_score": total_score,
-        "best_score": best_score,
-        "games": [
-            {
-                "game_id": game.id,
-                "word": game.word,
-                "category": game.category,
-                "score": game.score
-            }
-            for game in games
-        ]
-    })
+    return jsonify(
+        {
+            "total_games": total_games,
+            "total_score": total_score,
+            "best_score": best_score,
+            "games": [
+                {
+                    "game_id": s.game_id,
+                    "total_points": s.total_points,
+                }
+                for s in scores
+            ],
+        }
+    )
 
-@api.route("/drawings/final", methods=["GET"])
+
+@api_blueprint.route("/drawings/final", methods=["GET"])
 @token_required
 def get_final_drawings(user_id):
-    # On récupère tous les dessins finaux liés aux parties du joueur
-    games = Game.query.filter_by(user_id=user_id).all()
-    game_ids = [g.id for g in games]
+    rounds = (
+        Round.query.join(Game, Round.game_id == Game.id)
+        .filter((Game.creator_id == user_id) | (Game.opponent_id == user_id))
+        .all()
+    )
+    round_ids = [r.id for r in rounds]
 
     final_drawings = Drawing.query.filter(
-        Drawing.game_id.in_(game_ids),
-        Drawing.is_final == True
+        Drawing.round_id.in_(round_ids), Drawing.is_final.is_(True)
     ).all()
 
-    results = [
+    return jsonify(
         {
-            "drawing_id": d.id,
-            "game_id": d.game_id,
-            "ndjson": d.ndjson,
-            "created_at": d.created_at.isoformat() if hasattr(d, "created_at") else None
+            "final_drawings": [
+                {
+                    "drawing_id": d.id,
+                    "round_id": d.round_id,
+                    "ndjson": d.ndjson,
+                }
+                for d in final_drawings
+            ]
         }
-        for d in final_drawings
-    ]
+    )
 
-    return jsonify({"final_drawings": results})
+@api_blueprint.route("/categories", methods=["GET"])
+def get_categories():
+    categories = Category.query.all()
+    return jsonify([
+        {"id": cat.id, "name": cat.name}
+        for cat in categories
+    ])
+
+@api_blueprint.route("/profile/stats", methods=["GET"])
+@token_required
+def get_profile_stats(user_id):
+    scores = Score.query.filter_by(user_id=user_id).all()
+    game_ids = [s.game_id for s in scores]
+    games = Game.query.filter(Game.id.in_(game_ids)).all()
+
+    diff_stats = {}
+    for g in games:
+        diff = g.difficulty.value
+        if diff not in diff_stats:
+            diff_stats[diff] = {"count": 0, "total_score": 0}
+        diff_stats[diff]["count"] += 1
+        score = next((s.total_points for s in scores if s.game_id == g.id), 0)
+        diff_stats[diff]["total_score"] += score
+
+    category_counter = Counter()
+
+    for g in games:
+        rounds = Round.query.filter_by(game_id=g.id).all()
+        categories_in_game = set()
+        for r in rounds:
+            word = Word.query.get(r.word_id)
+            category = Category.query.get(word.category_id)
+            categories_in_game.add(category.name)
+        for cname in categories_in_game:
+            category_counter[cname] += 1
+
+    word_scores = {}
+    for g in games:
+        rounds = Round.query.filter_by(game_id=g.id).all()
+        for r in rounds:
+            word = Word.query.get(r.word_id)
+            if word.text not in word_scores:
+                word_scores[word.text] = {"total": 0, "count": 0, "has_score": False}
+            word_scores[word.text]["total"] += r.score or 0
+            word_scores[word.text]["count"] += 1
+            if (r.score or 0) > 0:
+                word_scores[word.text]["has_score"] = True
+
+    top_words_avg_score = sorted(
+        [
+            (word, round(info["total"] / info["count"], 2))
+            for word, info in word_scores.items()
+            if info["has_score"]
+        ],
+        key=lambda x: x[1],
+        reverse=True
+    )[:5]
+
+    return jsonify({
+        "total_games": len(games),
+        "avg_score": round(sum(s.total_points for s in scores) / len(scores), 2) if scores else 0,
+        "difficulty_stats": {
+            k: {
+                "count": v["count"],
+                "avg_score": round(v["total_score"] / v["count"], 2)
+            } for k, v in diff_stats.items()
+        },
+        "category_stats": category_counter,
+        "top_words": top_words_avg_score
+    })
