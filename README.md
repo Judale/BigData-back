@@ -26,7 +26,12 @@ pip install --upgrade pip
 
 # 3. Installer les dépendances
 pip install -r requirements.txt
+
+source venv/bin/activate
 ```
+
+
+
 
 ### Sur Windows (PowerShell)
 

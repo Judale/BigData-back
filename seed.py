@@ -3,7 +3,7 @@ from backend.models import Category, Word
 from app import create_app
 
 WORDS = {
-    "Nourriture": [
+    "Animaux": [
         "ship",
         "bird",
         "camel",
@@ -48,7 +48,7 @@ WORDS = {
         "knife",
         "fork"
     ],
-    "Animaux": [
+    "Nourriture": [
         "apple",
         "banana",
         "birthday_cake",
@@ -69,6 +69,14 @@ WORDS = {
         "pizza",
         "strawberry",
         "watermelon"
+    ],
+    "Test": [
+            "airplane",
+            "angel",
+            "bridge",
+            "cup",
+            "door",
+            "mountain"
     ],
 }
 

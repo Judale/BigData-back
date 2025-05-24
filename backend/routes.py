@@ -4,6 +4,7 @@ import random
 
 from flask import Blueprint, request, jsonify, render_template_string
 from sqlalchemy.sql import func
+from sqlalchemy.exc import IntegrityError   # ← pour capturer l’éventuelle violation d’unicité
 
 from backend.database import db
 from backend.models import (
@@ -151,8 +152,6 @@ def submit_drawing():
     rnd = Round.query.get_or_404(round_id)
     game = Game.query.get(rnd.game_id)
 
-    db.session.add(Drawing(round_id=rnd.id, ndjson=drawing, is_final=True))
-
     label, proba = predict(drawing["drawing"])
     target_word = Word.query.get(rnd.word_id).text
 
@@ -160,29 +159,50 @@ def submit_drawing():
         sc = compute_score(elapsed, game.difficulty.value)
         rnd.time_taken = elapsed
         rnd.score = sc
+        db.session.add(Drawing(round_id=rnd.id, ndjson=drawing, is_final=True))
         db.session.commit()
         return jsonify({"status": "recognized", "score": sc})
 
+    db.session.add(Drawing(round_id=rnd.id, ndjson=drawing, is_final=False))
     db.session.commit()
     return jsonify({"status": "pending", "label": label, "proba": round(proba, 2)})
 
 
 @api_blueprint.route("/finish-game/<int:game_id>", methods=["POST"])
-def finish_game(game_id: int):
+@token_required
+def finish_game(user_id, game_id: int):
+    """Calcule le score total et l’enregistre (1 seule ligne par couple game/user)."""
     game = Game.query.get_or_404(game_id)
+
     total = (
-        db.session.query(func.sum(Round.score)).filter_by(game_id=game.id).scalar() or 0
-    )
+        db.session.query(func.sum(Round.score))
+        .filter_by(game_id=game.id)
+        .scalar()
+    ) or 0
 
-    user_id = request.headers.get("X-User-ID", type=int) or game.creator_id
-    db.session.add(Score(game_id=game.id, user_id=user_id, total_points=total))
+    # user_id provient du token, on n’a pas besoin d’un header externe
 
-    game.finished_at = datetime.utcnow()
-    db.session.commit()
+    # Cherche un score déjà existant
+    score = Score.query.filter_by(game_id=game.id, user_id=user_id).first()
+    if score:
+        score.total_points = total  # mise à jour
+    else:
+        db.session.add(Score(game_id=game.id, user_id=user_id, total_points=total))
+
+    # Ne renseigne finished_at qu’une seule fois
+    if game.finished_at is None:
+        game.finished_at = datetime.utcnow()
+
+    try:
+        db.session.commit()
+    except IntegrityError:  # au cas où deux requêtes concurrentes passent quand même
+        db.session.rollback()
+        return jsonify({"error": "Score already recorded"}), 409
+
     return jsonify({"total_points": total})
 
 # ---------------------------------
-# Debug : visualiser un dessin
+# Debug : visualiser un dessin
 # ---------------------------------
 @api_blueprint.route("/drawing-view", methods=["POST"])
 def drawing_view():
