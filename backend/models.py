@@ -56,6 +56,7 @@ class Round(db.Model):
     order_idx  = db.Column(db.Integer, nullable=False)
     time_taken = db.Column(db.Float)  # secondes
     score      = db.Column(db.Integer)
+    word = db.relationship("Word", backref="rounds")
 
 class Drawing(db.Model):
     id        = db.Column(db.Integer, primary_key=True)

@@ -66,7 +66,16 @@ $Env:FLASK_ENV = "development"
 ```
 
 ---
+## Configuration DB
 
+```bash
+flask db init
+flask db migrate -m "initial"
+flask db upgrade
+python seed.py
+```
+
+---
 ## Lancer l’application
 
 ```bash

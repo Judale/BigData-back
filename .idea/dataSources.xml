@@ -31,5 +31,12 @@
         </library>
       </libraries>
     </data-source>
+    <data-source source="LOCAL" name="quickdraw.db" uuid="ab4c6dfa-a904-4fd8-916b-f2eb87ce159c">
+      <driver-ref>sqlite.xerial</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>org.sqlite.JDBC</jdbc-driver>
+      <jdbc-url>jdbc:sqlite:$PROJECT_DIR$/instance/quickdraw.db</jdbc-url>
+      <working-dir>$ProjectFileDir$</working-dir>
+    </data-source>
   </component>
 </project>

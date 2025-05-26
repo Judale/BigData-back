@@ -27,6 +27,11 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # ─────────────────────────────
 api_blueprint = Blueprint("api", __name__)
 
+CLASSES_10 = [
+    "airplane", "angel", "apple", "axe", "banana",
+    "bridge", "cup", "donut", "door", "mountain"
+]
+
 # ---------------------------------
 # Auth routes
 # ---------------------------------
@@ -147,13 +152,16 @@ def submit_drawing():
     data = request.get_json(force=True)
     round_id = data["round_id"]
     elapsed = float(data["elapsed_time"])
-    drawing = data["ndjson"]  # strokes only
+    drawing = data["ndjson"]
 
     rnd = Round.query.get_or_404(round_id)
     game = Game.query.get(rnd.game_id)
-
-    label, proba = predict(drawing["drawing"])
     target_word = Word.query.get(rnd.word_id).text
+
+    # Vérifie si le mot appartient au modèle à 10 classes
+    model_type = "default" if target_word in CLASSES_10 else "extended"
+
+    label, proba = predict(drawing["drawing"], model_type=model_type)
 
     if label == target_word:
         sc = compute_score(elapsed, game.difficulty.value)
@@ -161,12 +169,11 @@ def submit_drawing():
         rnd.score = sc
         db.session.add(Drawing(round_id=rnd.id, ndjson=drawing, is_final=True))
         db.session.commit()
-        return jsonify({"status": "recognized", "score": sc})
+        return jsonify({"status": "recognized", "score": sc, "model": model_type})
 
     db.session.add(Drawing(round_id=rnd.id, ndjson=drawing, is_final=False))
     db.session.commit()
-    return jsonify({"status": "pending", "label": label, "proba": round(proba, 2)})
-
+    return jsonify({"status": "pending", "label": label, "proba": round(proba, 2), "model": model_type})
 
 @api_blueprint.route("/finish-game/<int:game_id>", methods=["POST"])
 @token_required
@@ -279,11 +286,17 @@ def profile_me(user_id):
 @token_required
 def get_final_drawings(user_id):
     rounds = (
-        Round.query.join(Game, Round.game_id == Game.id)
+        db.session.query(Round)
+        .join(Game, Round.game_id == Game.id)
+        .join(Word, Round.word_id == Word.id)
         .filter((Game.creator_id == user_id) | (Game.opponent_id == user_id))
         .all()
     )
-    round_ids = [r.id for r in rounds]
+
+    # Mapping round_id → (game_id, word)
+    round_map = {r.id: {"game_id": r.game_id, "word": r.word.text} for r in rounds}
+
+    round_ids = list(round_map.keys())
 
     final_drawings = Drawing.query.filter(
         Drawing.round_id.in_(round_ids), Drawing.is_final.is_(True)
@@ -295,6 +308,8 @@ def get_final_drawings(user_id):
                 {
                     "drawing_id": d.id,
                     "round_id": d.round_id,
+                    "game_id": round_map[d.round_id]["game_id"],
+                    "word": round_map[d.round_id]["word"],
                     "ndjson": d.ndjson,
                 }
                 for d in final_drawings
