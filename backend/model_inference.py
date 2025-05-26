@@ -32,7 +32,7 @@ class BetterCNN(nn.Module):
             nn.Linear(128, num_classes),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:       # type: ignore
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.classifier(self.features(x))
 
 
@@ -43,7 +43,7 @@ def strokes_to_canvas256(drawing: list, lw: int = 3, padding: int = 10) -> Image
     xs, ys = [], []
     for stroke in drawing:
         xs.extend(stroke[0]); ys.extend(stroke[1])
-    if not xs:                                                # dessin vide
+    if not xs:
         return Image.new("L", (256, 256), 0)
 
     xs, ys = np.array(xs), np.array(ys)
@@ -67,7 +67,7 @@ def strokes_to_canvas256(drawing: list, lw: int = 3, padding: int = 10) -> Image
 
 def center_resize(img256: Image.Image, size: int = 28, pad: int = 2) -> np.ndarray:
     box = img256.getbbox()
-    if box is None:                                          # rien dessiné
+    if box is None:
         return np.zeros((size, size), dtype=np.float32)
     crop = img256.crop(box)
 
@@ -87,37 +87,67 @@ def center_resize(img256: Image.Image, size: int = 28, pad: int = 2) -> np.ndarr
 # ----------------------------------------------------------------------
 # Chargement du modèle (une seule fois) + prédiction
 # ----------------------------------------------------------------------
-CLASSES = [
+CLASSES_10 = [
     "airplane", "angel", "apple", "axe", "banana",
     "bridge", "cup", "donut", "door", "mountain"
 ]
-WEIGHTS = Path("backend/modele/prod/quickdraw_cnn.pth")
-WEIGHTS_60_class = Path("backend/modele/prod/quickdraw_cnn_60_class.pth")
 
-@lru_cache(maxsize=1)
-def _get_model():
+CLASSES_60 = [
+    "ship", "bird", "camel", "cat", "dolphin", "crab", "fish", "flamingo", "hedgehog", "raccoon",
+    "lion", "octopus", "whale", "shark", "rhinoceros", "rabbit", "pig", "crocodile", "cow", "elephant",
+    "alarm_clock", "anvil", "axe", "backpack", "baseball_bat", "bed", "belt", "bicycle", "cell_phone",
+    "flip_flops", "headphones", "tshirt", "flower", "eyeglasses", "harp", "hexagon", "key", "ladder",
+    "knife", "fork", "apple", "banana", "birthday_cake", "blueberry", "bread", "broccoli", "carrot",
+    "cookie", "donut", "grapes", "hamburger", "hot_dog", "ice_cream", "lollipop", "mushroom", "pear",
+    "pineapple", "pizza", "strawberry", "watermelon"
+]
+
+CLASSES_51 = [
+    "anvil", "apple", "axe", "backpack", "banana", "bed", "belt", "bicycle",
+    "bird", "blueberry", "bread", "broccoli", "camel", "carrot", "cat",
+    "cookie", "cow", "crab", "crocodile", "dolphin", "donut", "elephant",
+    "eyeglasses", "fish", "flamingo", "flower", "fork", "grapes", "hamburger",
+    "harp", "headphones", "hedgehog", "hexagon", "key", "knife", "ladder",
+    "lion", "lollipop", "mushroom", "octopus", "pear", "pig", "pineapple",
+    "pizza", "rabbit", "raccoon", "rhinoceros", "shark", "strawberry",
+    "watermelon", "whale"
+]
+
+WEIGHTS_10 = Path("backend/modele/prod/quickdraw_cnn.pth")
+WEIGHTS_60 = Path("backend/modele/prod/quickdraw_cnn_60_class.pth")
+
+
+@lru_cache(maxsize=2)
+def _get_model(model_type: str = "default"):
+    if model_type == "extended":
+        weights = WEIGHTS_60
+        classes = CLASSES_51
+    else:
+        weights = WEIGHTS_10
+        classes = CLASSES_10
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = BetterCNN(num_classes=len(CLASSES)).to(device)
+    model = BetterCNN(num_classes=len(classes)).to(device)
 
-    if not WEIGHTS.is_file():
-        raise FileNotFoundError(f"Poids introuvables : {WEIGHTS.resolve()}")
-    state = torch.load(WEIGHTS, map_location=device)
+    if not weights.is_file():
+        raise FileNotFoundError(f"Poids introuvables : {weights.resolve()}")
+    state = torch.load(weights, map_location=device)
     model.load_state_dict(state, strict=True)
     model.eval()
-    return model, device
+    return model, device, classes
 
 
-def predict(drawing: list) -> tuple[str, float]:
-    """drawing = objet JSON['drawing'] (liste de strokes)"""
-    model, device = _get_model()
+def predict(drawing: list, model_type: str = "default") -> tuple[str, float]:
+    """drawing = JSON['drawing'] (liste de strokes), model_type = 'default' ou 'extended'"""
+    model, device, classes = _get_model(model_type)
 
     img256 = strokes_to_canvas256(drawing)
-    img28  = center_resize(img256) / 255.0                    # [0-1] float32
+    img28  = center_resize(img256) / 255.0
 
-    x = torch.from_numpy(img28[None, None]).to(device)        # shape (1,1,28,28)
+    x = torch.from_numpy(img28[None, None]).to(device)
     with torch.no_grad():
         logits = model(x)
         idx = int(logits.argmax(1))
         prob = torch.softmax(logits, 1)[0, idx].item()
 
-    return CLASSES[idx], prob
+    return classes[idx], prob

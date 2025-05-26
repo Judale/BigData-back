@@ -26,7 +26,12 @@ pip install --upgrade pip
 
 # 3. Installer les dépendances
 pip install -r requirements.txt
+
+source venv/bin/activate
 ```
+
+
+
 
 ### Sur Windows (PowerShell)
 
@@ -61,7 +66,16 @@ $Env:FLASK_ENV = "development"
 ```
 
 ---
+## Configuration DB
 
+```bash
+flask db init
+flask db migrate -m "initial"
+flask db upgrade
+python seed.py
+```
+
+---
 ## Lancer l’application
 
 ```bash
