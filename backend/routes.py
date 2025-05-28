@@ -1,5 +1,5 @@
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 import random
 
 from flask import Blueprint, request, jsonify, render_template_string
@@ -332,6 +332,31 @@ def get_profile_stats(user_id):
     game_ids = [s.game_id for s in scores]
     games = Game.query.filter(Game.id.in_(game_ids)).all()
 
+    # Nombre de parties jouées
+    total_games = len(games)
+    # Meilleur score
+    best_score = max((s.total_points for s in scores), default=0)
+    # Moyenne des scores
+    avg_score = round(sum(s.total_points for s in scores) / total_games, 2) if total_games else 0
+
+    # Temps moyen de détection IA (sur tous les rounds joués)
+    rounds = Round.query.join(Game).filter(Game.id.in_(game_ids)).all()
+    times = [r.time_taken for r in rounds if r.time_taken is not None]
+    avg_time_taken = round(sum(times) / len(times), 2) if times else None
+
+    # Statistiques par catégorie
+    category_counter = Counter()
+    for g in games:
+        rounds_in_game = Round.query.filter_by(game_id=g.id).all()
+        categories_in_game = set()
+        for r in rounds_in_game:
+            word = Word.query.get(r.word_id)
+            category = Category.query.get(word.category_id)
+            categories_in_game.add(category.name)
+        for cname in categories_in_game:
+            category_counter[cname] += 1
+
+    # Statistiques par difficulté
     diff_stats = {}
     for g in games:
         diff = g.difficulty.value
@@ -341,43 +366,35 @@ def get_profile_stats(user_id):
         score = next((s.total_points for s in scores if s.game_id == g.id), 0)
         diff_stats[diff]["total_score"] += score
 
-    category_counter = Counter()
+    # Nombre de mots joués
+    total_words = sum(Round.query.filter_by(game_id=g.id).count() for g in games)
 
-    for g in games:
-        rounds = Round.query.filter_by(game_id=g.id).all()
-        categories_in_game = set()
-        for r in rounds:
-            word = Word.query.get(r.word_id)
-            category = Category.query.get(word.category_id)
-            categories_in_game.add(category.name)
-        for cname in categories_in_game:
-            category_counter[cname] += 1
-
-    word_scores = {}
-    for g in games:
-        rounds = Round.query.filter_by(game_id=g.id).all()
-        for r in rounds:
-            word = Word.query.get(r.word_id)
-            if word.text not in word_scores:
-                word_scores[word.text] = {"total": 0, "count": 0, "has_score": False}
-            word_scores[word.text]["total"] += r.score or 0
-            word_scores[word.text]["count"] += 1
-            if (r.score or 0) > 0:
-                word_scores[word.text]["has_score"] = True
-
-    top_words_avg_score = sorted(
-        [
-            (word, round(info["total"] / info["count"], 2))
-            for word, info in word_scores.items()
-            if info["has_score"]
-        ],
-        key=lambda x: x[1],
-        reverse=True
-    )[:5]
+    # Statistiques par période
+    now = datetime.utcnow()
+    periods = {
+        "day": now - timedelta(days=1),
+        "week": now - timedelta(weeks=1),
+        "month": now - timedelta(days=30),
+        "alltime": datetime.min,
+    }
+    period_stats = {}
+    for pname, since in periods.items():
+        games_in_period = [g for g in games if g.started_at and g.started_at >= since]
+        scores_in_period = [s for s in scores if any(g.id == s.game_id for g in games_in_period)]
+        total_games_p = len(games_in_period)
+        avg_score_p = round(sum(s.total_points for s in scores_in_period) / total_games_p, 2) if total_games_p else 0
+        best_score_p = max((s.total_points for s in scores_in_period), default=0)
+        period_stats[pname] = {
+            "total_games": total_games_p,
+            "avg_score": avg_score_p,
+            "best_score": best_score_p,
+        }
 
     return jsonify({
-        "total_games": len(games),
-        "avg_score": round(sum(s.total_points for s in scores) / len(scores), 2) if scores else 0,
+        "total_games": total_games,
+        "best_score": best_score,
+        "avg_score": avg_score,
+        "avg_time_taken": avg_time_taken,
         "difficulty_stats": {
             k: {
                 "count": v["count"],
@@ -385,5 +402,59 @@ def get_profile_stats(user_id):
             } for k, v in diff_stats.items()
         },
         "category_stats": category_counter,
-        "top_words": top_words_avg_score
+        "total_words": total_words,
+        "period_stats": period_stats,
+    })
+
+@api_blueprint.route("/general-stats", methods=["GET"])
+def get_general_stats():
+    # Leaderboard top 10
+    leaderboard = (
+        db.session.query(
+            User.username,
+            func.sum(Score.total_points).label("total_points")
+        )
+        .join(Score, Score.user_id == User.id)
+        .group_by(User.id)
+        .order_by(func.sum(Score.total_points).desc())
+        .limit(10)
+        .all()
+    )
+    leaderboard_data = [
+        {"username": row.username, "total_points": row.total_points}
+        for row in leaderboard
+    ]
+
+    # Difficultés disponibles
+    difficulties = [d.value for d in Difficulty]
+
+    # Moyenne de points par dessin (round)
+    avg_points_per_drawing = (
+        db.session.query(func.avg(Round.score))
+        .filter(Round.score != None)
+        .scalar()
+    )
+    avg_points_per_drawing = round(avg_points_per_drawing, 2) if avg_points_per_drawing else 0
+
+    # Moyenne de points par catégorie
+    category_scores = (
+        db.session.query(
+            Category.name,
+            func.avg(Round.score)
+        )
+        .join(Word, Word.category_id == Category.id)
+        .join(Round, Round.word_id == Word.id)
+        .filter(Round.score != None)
+        .group_by(Category.id)
+        .all()
+    )
+    avg_points_per_category = {
+        name: round(avg, 2) if avg else 0 for name, avg in category_scores
+    }
+
+    return jsonify({
+        "leaderboard": leaderboard_data,
+        "difficulties": difficulties,
+        "avg_points_per_drawing": avg_points_per_drawing,
+        "avg_points_per_category": avg_points_per_category,
     })
