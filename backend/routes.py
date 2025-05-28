@@ -195,7 +195,6 @@ def submit_drawing():
         "model": model_type
     })
 
-
 @api_blueprint.route("/finish-game/<int:game_id>", methods=["POST"])
 @token_required
 def finish_game(user_id, game_id: int):
