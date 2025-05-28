@@ -1,9 +1,6 @@
-"""
-Chargement + inférence BetterCNN à partir d'un dessin (format QuickDraw).
-Le poids n’est chargé qu’une seule fois grâce au cache LRU.
-"""
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -11,7 +8,7 @@ import torch.nn as nn
 from PIL import Image, ImageDraw
 
 # ----------------------------------------------------------------------
-# Réseau (identique à l’entraînement)
+# Réseau identique à l'entraînement
 # ----------------------------------------------------------------------
 class BetterCNN(nn.Module):
     def __init__(self, num_classes: int = 10) -> None:
@@ -35,9 +32,8 @@ class BetterCNN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.classifier(self.features(x))
 
-
 # ----------------------------------------------------------------------
-# Fonctions utilitaires dessin ➜ tenseur 28 × 28
+# Conversion dessin QuickDraw -> image 28x28
 # ----------------------------------------------------------------------
 def strokes_to_canvas256(drawing: list, lw: int = 3, padding: int = 10) -> Image.Image:
     xs, ys = [], []
@@ -64,7 +60,6 @@ def strokes_to_canvas256(drawing: list, lw: int = 3, padding: int = 10) -> Image
         drw.line(pts, fill=255, width=lw)
     return img
 
-
 def center_resize(img256: Image.Image, size: int = 28, pad: int = 2) -> np.ndarray:
     box = img256.getbbox()
     if box is None:
@@ -83,24 +78,10 @@ def center_resize(img256: Image.Image, size: int = 28, pad: int = 2) -> np.ndarr
     canvas.paste(crop, ((size - new_w) // 2, (size - new_h) // 2))
     return np.asarray(canvas, dtype=np.float32)
 
-
 # ----------------------------------------------------------------------
-# Chargement du modèle (une seule fois) + prédiction
+# Constantes
 # ----------------------------------------------------------------------
-CLASSES_10 = [
-    "airplane", "angel", "apple", "axe", "banana",
-    "bridge", "cup", "donut", "door", "mountain"
-]
-
-CLASSES_60 = [
-    "ship", "bird", "camel", "cat", "dolphin", "crab", "fish", "flamingo", "hedgehog", "raccoon",
-    "lion", "octopus", "whale", "shark", "rhinoceros", "rabbit", "pig", "crocodile", "cow", "elephant",
-    "alarm_clock", "anvil", "axe", "backpack", "baseball_bat", "bed", "belt", "bicycle", "cell_phone",
-    "flip_flops", "headphones", "tshirt", "flower", "eyeglasses", "harp", "hexagon", "key", "ladder",
-    "knife", "fork", "apple", "banana", "birthday_cake", "blueberry", "bread", "broccoli", "carrot",
-    "cookie", "donut", "grapes", "hamburger", "hot_dog", "ice_cream", "lollipop", "mushroom", "pear",
-    "pineapple", "pizza", "strawberry", "watermelon"
-]
+CLASSES_10 = ["airplane", "angel", "apple", "axe", "banana", "bridge", "cup", "donut", "door", "mountain"]
 
 CLASSES_51 = [
     "anvil", "apple", "axe", "backpack", "banana", "bed", "belt", "bicycle",
@@ -113,18 +94,59 @@ CLASSES_51 = [
     "watermelon", "whale"
 ]
 
-WEIGHTS_10 = Path("backend/modele/prod/quickdraw_cnn.pth")
-WEIGHTS_60 = Path("backend/modele/prod/quickdraw_cnn_60_class.pth")
+CLASSES_ANIMAUX = [
+    "bird", "camel", "cat", "cow", "crab", "crocodile", "dolphin",
+    "elephant", "fish", "flamingo", "hedgehog", "lion", "octopus",
+    "pig", "rabbit", "raccoon", "rhinoceros", "shark", "whale"
+]
 
+CLASSES_OBJETS = [
+    "alarm clock", "anvil", "axe", "backpack", "baseball bat", "bed",
+    "belt", "bicycle", "cell phone", "eyeglasses", "flip flops", "flower",
+    "fork", "harp", "headphones", "hexagon", "key", "knife", "ladder"
+]
 
-@lru_cache(maxsize=2)
-def _get_model(model_type: str = "default"):
-    if model_type == "extended":
-        weights = WEIGHTS_60
-        classes = CLASSES_51
-    else:
-        weights = WEIGHTS_10
-        classes = CLASSES_10
+CLASSES_NOURRITURE = [
+    "apple", "banana", "birthday_cake", "blueberry", "bread", "broccoli",
+    "carrot", "cookie", "donut", "grapes", "hamburger", "hot dog",
+    "ice_cream", "lollipop", "mushroom", "pear", "pineapple", "pizza",
+    "strawberry", "watermelon"
+]
+
+MODEL_CONFIGS = {
+    "default": {
+        "weights": Path("backend/modele/prod/quickdraw_cnn.pth"),
+        "classes": CLASSES_10,
+    },
+    "extended": {
+        "weights": Path("backend/modele/prod/quickdraw_cnn_60_class.pth"),
+        "classes":CLASSES_51,
+    },
+    "animaux": {
+        "weights": Path("backend/modele/prod/Animaux-CNN.pth"),
+        "classes": CLASSES_ANIMAUX,
+    },
+    "objets": {
+        "weights": Path("backend/modele/prod/Objets-CNN.pth"),
+        "classes": CLASSES_OBJETS,
+    },
+    "nourriture": {
+        "weights": Path("backend/modele/prod/Nourritures.pth"),
+        "classes": CLASSES_NOURRITURE,
+    },
+}
+
+# ----------------------------------------------------------------------
+# Chargement du modèle (une seule fois) + prédiction
+# ----------------------------------------------------------------------
+@lru_cache(maxsize=5)
+def _get_model(model_type: Literal["default", "extended", "animaux", "objets", "nourriture"] = "default"):
+    if model_type not in MODEL_CONFIGS:
+        raise ValueError(f"Type de modèle inconnu : {model_type}")
+
+    config = MODEL_CONFIGS[model_type]
+    weights = config["weights"]
+    classes = config["classes"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = BetterCNN(num_classes=len(classes)).to(device)
@@ -136,13 +158,11 @@ def _get_model(model_type: str = "default"):
     model.eval()
     return model, device, classes
 
-
 def predict(drawing: list, model_type: str = "default") -> tuple[str, float]:
-    """drawing = JSON['drawing'] (liste de strokes), model_type = 'default' ou 'extended'"""
     model, device, classes = _get_model(model_type)
 
     img256 = strokes_to_canvas256(drawing)
-    img28  = center_resize(img256) / 255.0
+    img28 = center_resize(img256) / 255.0
 
     x = torch.from_numpy(img28[None, None]).to(device)
     with torch.no_grad():

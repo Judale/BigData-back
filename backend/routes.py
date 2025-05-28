@@ -18,7 +18,7 @@ from backend.models import (
     Round,
     Score,
 )
-from backend.model_inference import predict
+from backend.model_inference import predict, CLASSES_ANIMAUX, CLASSES_OBJETS, CLASSES_NOURRITURE
 from backend.utils import generate_token, token_required, compute_score
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -158,12 +158,26 @@ def submit_drawing():
     game = Game.query.get(rnd.game_id)
     target_word = Word.query.get(rnd.word_id).text
 
-    # Vérifie si le mot appartient au modèle à 10 classes
-    model_type = "default" if target_word in CLASSES_10 else "extended"
+    # Normalisation du mot pour comparaison (underscore si besoin)
+    normalized_word = target_word.lower().replace(" ", "_")
 
+    # Détermine le modèle à utiliser
+    if normalized_word in CLASSES_10:
+        model_type = "default"
+    elif normalized_word in CLASSES_ANIMAUX:
+        model_type = "animaux"
+    elif normalized_word in CLASSES_OBJETS:
+        model_type = "objets"
+    elif normalized_word in CLASSES_NOURRITURE:
+        model_type = "nourriture"
+    else:
+        model_type = "extended"
+
+    # Prédiction
     label, proba = predict(drawing["drawing"], model_type=model_type)
 
-    if label == target_word:
+    # Reconnaissance correcte
+    if label.replace("_", " ") == target_word.lower():
         sc = compute_score(elapsed, game.difficulty.value)
         rnd.time_taken = elapsed
         rnd.score = sc
@@ -171,9 +185,16 @@ def submit_drawing():
         db.session.commit()
         return jsonify({"status": "recognized", "score": sc, "model": model_type})
 
+    # Reconnaissance incorrecte
     db.session.add(Drawing(round_id=rnd.id, ndjson=drawing, is_final=False))
     db.session.commit()
-    return jsonify({"status": "pending", "label": label, "proba": round(proba, 2), "model": model_type})
+    return jsonify({
+        "status": "pending",
+        "label": label.replace("_", " "),
+        "proba": round(proba, 2),
+        "model": model_type
+    })
+
 
 @api_blueprint.route("/finish-game/<int:game_id>", methods=["POST"])
 @token_required
