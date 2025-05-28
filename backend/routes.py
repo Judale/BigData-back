@@ -2,6 +2,7 @@ from collections import Counter
 from datetime import datetime
 import random
 
+from flasgger import swag_from
 from flask import Blueprint, request, jsonify, render_template_string
 from sqlalchemy.sql import func
 from sqlalchemy.exc import IntegrityError   # ← pour capturer l’éventuelle violation d’unicité
@@ -37,6 +38,46 @@ CLASSES_10 = [
 # ---------------------------------
 @api_blueprint.route("/register", methods=["POST"])
 def register():
+    """
+    Création d'un nouvel utilisateur
+    ---
+    tags:
+      - Auth
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              username:
+                type: string
+                example: "alice"
+              password:
+                type: string
+                example: "secret"
+    responses:
+      201:
+        description: Utilisateur créé
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message:
+                  type: string
+                  example: "User created"
+      400:
+        description: Nom d'utilisateur déjà existant
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                error:
+                  type: string
+                  example: "Username already exists"
+    """
     data = request.get_json()
     if User.query.filter_by(username=data["username"]).first():
         return jsonify({"error": "Username already exists"}), 400
@@ -51,6 +92,45 @@ def register():
 
 @api_blueprint.route("/login", methods=["POST"])
 def login():
+    """
+    Authentification d'un utilisateur
+    ---
+    tags:
+      - Auth
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              username:
+                type: string
+              password:
+                type: string
+    responses:
+      200:
+        description: Connexion réussie
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                user_id:
+                  type: integer
+      401:
+        description: Identifiants invalides
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                error:
+                  type: string
+                  example: "Invalid credentials"
+    """
     data = request.get_json()
     user = User.query.filter_by(username=data["username"]).first()
     if user and check_password_hash(user.password_hash, data["password"]):
@@ -94,7 +174,60 @@ def _select_words(mode: Mode, length: int, categories: list[str]) -> list[Word]:
 
 @api_blueprint.route("/start-game", methods=["POST"])
 @token_required
-def start_game(user_id):  # Le token donne user_id
+def start_game(user_id):
+    """
+    Démarre une nouvelle partie
+    ---
+    tags:
+      - Game
+    security:
+      - Bearer: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              length:
+                type: integer
+                example: 5
+              difficulty:
+                type: string
+                enum: [easy, medium, hard]
+              mode:
+                type: string
+                enum: [single, multi, all, versus]
+              categories:
+                type: array
+                items:
+                  type: string
+              opponent_id:
+                type: integer
+    responses:
+      201:
+        description: Partie créée
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                game_id:
+                  type: integer
+                round_id:
+                  type: integer
+                word:
+                  type: string
+      400:
+        description: Paramètres invalides
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                error:
+                  type: string
+    """
     data = request.get_json(force=True)
     length = int(data.get("length", 5))
     difficulty = Difficulty(data.get("difficulty", "easy"))
@@ -138,6 +271,33 @@ def start_game(user_id):  # Le token donne user_id
 
 @api_blueprint.route("/next-word/<int:game_id>/<int:current_idx>")
 def next_word(game_id: int, current_idx: int):
+    """
+    Récupère le mot suivant dans la partie
+    ---
+    tags:
+      - Game
+    parameters:
+      - in: path
+        name: game_id
+        schema:
+          type: integer
+      - in: path
+        name: current_idx
+        schema:
+          type: integer
+    responses:
+      200:
+        description: Mot suivant
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                round_id:
+                  type: integer
+                word:
+                  type: string
+    """
     rnd = Round.query.filter_by(game_id=game_id, order_idx=current_idx + 1).first()
     if not rnd:
         return jsonify({"word": None})
@@ -149,6 +309,39 @@ def next_word(game_id: int, current_idx: int):
 
 @api_blueprint.route("/submit-drawing", methods=["POST"])
 def submit_drawing():
+    """
+    Soumet un dessin pour reconnaissance
+    ---
+    tags:
+      - Drawing
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              round_id:
+                type: integer
+              elapsed_time:
+                type: number
+              ndjson:
+                type: object
+    responses:
+      200:
+        description: Résultat de la reconnaissance
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                score:
+                  type: integer
+                model:
+                  type: string
+    """
     data = request.get_json(force=True)
     round_id = data["round_id"]
     elapsed = float(data["elapsed_time"])
@@ -178,6 +371,31 @@ def submit_drawing():
 @api_blueprint.route("/finish-game/<int:game_id>", methods=["POST"])
 @token_required
 def finish_game(user_id, game_id: int):
+    """
+    Termine la partie et enregistre le score
+    ---
+    tags:
+      - Game
+    security:
+      - Bearer: []
+    parameters:
+      - in: path
+        name: game_id
+        schema:
+          type: integer
+    responses:
+      200:
+        description: Score total
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                total_points:
+                  type: integer
+      409:
+        description: Score déjà enregistré
+    """
     """Calcule le score total et l’enregistre (1 seule ligne par couple game/user)."""
     game = Game.query.get_or_404(game_id)
 
@@ -213,6 +431,19 @@ def finish_game(user_id, game_id: int):
 # ---------------------------------
 @api_blueprint.route("/drawing-view", methods=["POST"])
 def drawing_view():
+    """
+    Affiche un dessin en SVG pour debug
+    ---
+    tags:
+      - Debug
+    requestBody:
+      required: true
+    responses:
+      200:
+        description: Vue SVG du dessin
+      400:
+        description: Pas de donnée à afficher
+    """
     data = request.get_json()
     strokes: list = []
 
@@ -261,6 +492,17 @@ def drawing_view():
 @api_blueprint.route("/profile/me", methods=["GET"])
 @token_required
 def profile_me(user_id):
+    """
+    Récupère le profil et scores de l'utilisateur
+    ---
+    tags:
+      - Profile
+    security:
+      - Bearer: []
+    responses:
+      200:
+        description: Statistiques de l'utilisateur
+    """
     scores = Score.query.filter_by(user_id=user_id).all()
     total_games = len(scores)
     total_score = sum(s.total_points for s in scores)
@@ -285,6 +527,17 @@ def profile_me(user_id):
 @api_blueprint.route("/drawings/final", methods=["GET"])
 @token_required
 def get_final_drawings(user_id):
+    """
+    Liste tous les dessins finaux de l'utilisateur
+    ---
+    tags:
+      - Drawing
+    security:
+      - Bearer: []
+    responses:
+      200:
+        description: Dessins finaux
+    """
     rounds = (
         db.session.query(Round)
         .join(Game, Round.game_id == Game.id)
@@ -319,6 +572,15 @@ def get_final_drawings(user_id):
 
 @api_blueprint.route("/categories", methods=["GET"])
 def get_categories():
+    """
+    Récupère la liste des catégories de mots
+    ---
+    tags:
+      - Meta
+    responses:
+      200:
+        description: Liste des catégories
+    """
     categories = Category.query.all()
     return jsonify([
         {"id": cat.id, "name": cat.name}
@@ -328,6 +590,17 @@ def get_categories():
 @api_blueprint.route("/profile/stats", methods=["GET"])
 @token_required
 def get_profile_stats(user_id):
+    """
+    Statistiques détaillées du profil utilisateur
+    ---
+    tags:
+      - Profile
+    security:
+      - Bearer: []
+    responses:
+      200:
+        description: Statistiques par difficulté, catégorie et mots
+    """
     scores = Score.query.filter_by(user_id=user_id).all()
     game_ids = [s.game_id for s in scores]
     games = Game.query.filter(Game.id.in_(game_ids)).all()
