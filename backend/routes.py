@@ -286,8 +286,12 @@ def profile_me(user_id):
     total_score = sum(s.total_points for s in scores)
     best_score = max((s.total_points for s in scores), default=0)
 
+    user = User.query.get(user_id)
+    username = user.username if user else None
+
     return jsonify(
         {
+            "username": username,
             "total_games": total_games,
             "total_score": total_score,
             "best_score": best_score,
@@ -352,6 +356,10 @@ def get_profile_stats(user_id):
     game_ids = [s.game_id for s in scores]
     games = Game.query.filter(Game.id.in_(game_ids)).all()
 
+    # Récupère le nom d'utilisateur
+    user = User.query.get(user_id)
+    username = user.username if user else None
+
     # Nombre de parties jouées
     total_games = len(games)
     # Meilleur score
@@ -411,6 +419,7 @@ def get_profile_stats(user_id):
         }
 
     return jsonify({
+        "username": username,
         "total_games": total_games,
         "best_score": best_score,
         "avg_score": avg_score,
@@ -478,3 +487,21 @@ def get_general_stats():
         "avg_points_per_drawing": avg_points_per_drawing,
         "avg_points_per_category": avg_points_per_category,
     })
+
+@api_blueprint.route("/change-password", methods=["POST"])
+@token_required
+def change_password(user_id):
+    data = request.get_json()
+    old_password = data.get("old_password")
+    new_password = data.get("new_password")
+
+    if not old_password or not new_password:
+        return jsonify({"error": "Both old and new passwords are required"}), 400
+
+    user = User.query.get(user_id)
+    if not user or not check_password_hash(user.password_hash, old_password):
+        return jsonify({"error": "Old password is incorrect"}), 401
+
+    user.password_hash = generate_password_hash(new_password, method="pbkdf2:sha256")
+    db.session.commit()
+    return jsonify({"message": "Password updated successfully"})
