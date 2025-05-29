@@ -355,49 +355,75 @@ def get_profile_stats(user_id):
     scores = Score.query.filter_by(user_id=user_id).all()
     game_ids = [s.game_id for s in scores]
     games = Game.query.filter(Game.id.in_(game_ids)).all()
-
-    # Récupère le nom d'utilisateur
     user = User.query.get(user_id)
     username = user.username if user else None
 
+    # Rounds de l'utilisateur
+    rounds = Round.query.join(Game).filter(Game.id.in_(game_ids)).all()
+
     # Nombre de parties jouées
     total_games = len(games)
-    # Meilleur score
     best_score = max((s.total_points for s in scores), default=0)
-    # Moyenne des scores
     avg_score = round(sum(s.total_points for s in scores) / total_games, 2) if total_games else 0
 
-    # Temps moyen de détection IA (sur tous les rounds joués)
-    rounds = Round.query.join(Game).filter(Game.id.in_(game_ids)).all()
+    # Temps moyen de détection IA global
     times = [r.time_taken for r in rounds if r.time_taken is not None]
     avg_time_taken = round(sum(times) / len(times), 2) if times else None
 
-    # Statistiques par catégorie
-    category_counter = Counter()
+    # --- AVG TIME TAKEN PAR GAME ---
+    avg_time_taken_per_game = {}
     for g in games:
-        rounds_in_game = Round.query.filter_by(game_id=g.id).all()
+        r_times = [r.time_taken for r in rounds if r.game_id == g.id and r.time_taken is not None]
+        avg_time_taken_per_game[g.id] = round(sum(r_times) / len(r_times), 2) if r_times else None
+
+    # --- PAR CATÉGORIE (par partie, pas par dessin) ---
+    category_stats = {}
+    for g in games:
+        # On récupère tous les rounds de la partie
+        rounds_in_game = [r for r in rounds if r.game_id == g.id]
+        # On récupère toutes les catégories présentes dans cette partie
         categories_in_game = set()
         for r in rounds_in_game:
             word = Word.query.get(r.word_id)
             category = Category.query.get(word.category_id)
             categories_in_game.add(category.name)
+        # On ajoute le score total de la partie à chaque catégorie concernée
         for cname in categories_in_game:
-            category_counter[cname] += 1
+            if cname not in category_stats:
+                category_stats[cname] = {"count": 0, "total_score": 0, "times": []}
+            category_stats[cname]["count"] += 1
+            # Score total de la partie
+            score = next((s.total_points for s in scores if s.game_id == g.id), 0)
+            category_stats[cname]["total_score"] += score
+            # Temps moyen de détection IA pour cette partie
+            r_times = [r.time_taken for r in rounds_in_game if r.time_taken is not None]
+            if r_times:
+                category_stats[cname]["times"].append(sum(r_times) / len(r_times))
+    # Finalise les moyennes
+    for cname, stat in category_stats.items():
+        stat["avg_score"] = round(stat["total_score"] / stat["count"], 2) if stat["count"] else 0
+        stat["avg_time_taken"] = round(sum(stat["times"]) / len(stat["times"]), 2) if stat["times"] else None
+        del stat["total_score"]
+        del stat["times"]
 
-    # Statistiques par difficulté
+    # --- PAR DIFFICULTÉ ---
     diff_stats = {}
     for g in games:
         diff = g.difficulty.value
         if diff not in diff_stats:
-            diff_stats[diff] = {"count": 0, "total_score": 0}
+            diff_stats[diff] = {"count": 0, "total_score": 0, "times": []}
         diff_stats[diff]["count"] += 1
         score = next((s.total_points for s in scores if s.game_id == g.id), 0)
         diff_stats[diff]["total_score"] += score
+        r_times = [r.time_taken for r in rounds if r.game_id == g.id and r.time_taken is not None]
+        diff_stats[diff]["times"].extend(r_times)
+    for diff, stat in diff_stats.items():
+        stat["avg_score"] = round(stat["total_score"] / stat["count"], 2) if stat["count"] else 0
+        stat["avg_time_taken"] = round(sum(stat["times"]) / len(stat["times"]), 2) if stat["times"] else None
+        del stat["total_score"]
+        del stat["times"]
 
-    # Nombre de mots joués
-    total_words = sum(Round.query.filter_by(game_id=g.id).count() for g in games)
-
-    # Statistiques par période
+    # --- PAR PÉRIODE ---
     now = datetime.utcnow()
     periods = {
         "day": now - timedelta(days=1),
@@ -409,14 +435,62 @@ def get_profile_stats(user_id):
     for pname, since in periods.items():
         games_in_period = [g for g in games if g.started_at and g.started_at >= since]
         scores_in_period = [s for s in scores if any(g.id == s.game_id for g in games_in_period)]
+        rounds_in_period = [r for r in rounds if any(g.id == r.game_id for g in games_in_period)]
         total_games_p = len(games_in_period)
         avg_score_p = round(sum(s.total_points for s in scores_in_period) / total_games_p, 2) if total_games_p else 0
         best_score_p = max((s.total_points for s in scores_in_period), default=0)
+        times_p = [r.time_taken for r in rounds_in_period if r.time_taken is not None]
+        avg_time_taken_p = round(sum(times_p) / len(times_p), 2) if times_p else None
         period_stats[pname] = {
             "total_games": total_games_p,
             "avg_score": avg_score_p,
             "best_score": best_score_p,
+            "avg_time_taken": avg_time_taken_p,
         }
+
+    # --- Nombre de mots joués ---
+    total_words = len(rounds)
+
+    # --- Tableau games au format demandé ---
+    games_array = []
+    for s in scores:
+        g = next((game for game in games if game.id == s.game_id), None)
+        if not g:
+            continue
+        # Récupère toutes les catégories jouées dans la partie
+        rounds_in_game = [r for r in rounds if r.game_id == g.id]
+        categories_in_game = set()
+        for r in rounds_in_game:
+            word = Word.query.get(r.word_id)
+            category = Category.query.get(word.category_id)
+            categories_in_game.add(category.name)
+        games_array.append({
+            "game_id": s.game_id,
+            "total_points": s.total_points,
+            "avg_time_taken": avg_time_taken_per_game.get(s.game_id),
+            "categories": list(categories_in_game),
+            "difficulty": g.difficulty.value if hasattr(g, "difficulty") else None,
+            "started_at": g.started_at.isoformat() if g.started_at else None,
+            "finished_at": g.finished_at.isoformat() if g.finished_at else None
+        })
+
+    # --- TOP 5 & FLOP 10 MOTS ---
+    # On regroupe les scores par mot
+    word_scores = {}
+    for r in rounds:
+        word = Word.query.get(r.word_id)
+        if word.text not in word_scores:
+            word_scores[word.text] = []
+        if r.score is not None:
+            word_scores[word.text].append(r.score)
+    # Calcule la moyenne par mot
+    word_avg_scores = [
+        (w, round(sum(scores) / len(scores), 2)) for w, scores in word_scores.items() if scores
+    ]
+    # Trie pour top et flop
+    word_avg_scores_sorted = sorted(word_avg_scores, key=lambda x: x[1], reverse=True)
+    top_5_words = word_avg_scores_sorted[:5]
+    flop_5_words = sorted(word_avg_scores_sorted[-5:], key=lambda x: x[1])  # du pire au moins pire
 
     return jsonify({
         "username": username,
@@ -424,15 +498,13 @@ def get_profile_stats(user_id):
         "best_score": best_score,
         "avg_score": avg_score,
         "avg_time_taken": avg_time_taken,
-        "difficulty_stats": {
-            k: {
-                "count": v["count"],
-                "avg_score": round(v["total_score"] / v["count"], 2)
-            } for k, v in diff_stats.items()
-        },
-        "category_stats": category_counter,
+        "difficulty_stats": diff_stats,
+        "category_stats": category_stats,
         "total_words": total_words,
         "period_stats": period_stats,
+        "games": games_array,
+        "top_words": [{"word": w, "avg_score_per_drawing": s} for w, s in top_5_words],
+        "flop_words": [{"word": w, "avg_score_per_drawing": s} for w, s in flop_5_words],
     })
 
 @api_blueprint.route("/general-stats", methods=["GET"])
