@@ -696,6 +696,39 @@ def get_profile_stats(user_id):
         del stat["total_score"]
         del stat["times"]
 
+    # --- PAR DURÉE ---
+    duration_stats = {
+        "short": {"count": 0, "total_score": 0, "times": []},
+        "medium": {"count": 0, "total_score": 0, "times": []},
+        "long": {"count": 0, "total_score": 0, "times": []},
+    }
+    for g in games:
+        if g.length == 5:
+            key = "short"
+            score = next((s.total_points for s in scores if s.game_id == g.id), 0)
+            score_affiche = score
+        elif g.length == 10:
+            key = "medium"
+            score = next((s.total_points for s in scores if s.game_id == g.id), 0)
+            score_affiche = round(score * 500 / 1000, 2)
+        elif g.length == 15:
+            key = "long"
+            score = next((s.total_points for s in scores if s.game_id == g.id), 0)
+            score_affiche = round(score * 500 / 1500, 2)
+        else:
+            continue
+        duration_stats[key]["count"] += 1
+        duration_stats[key]["total_score"] += score_affiche
+        r_times = [r.time_taken for r in rounds if r.game_id == g.id and r.time_taken is not None]
+        if r_times:
+            duration_stats[key]["times"].append(sum(r_times) / len(r_times))
+    # Finalise les moyennes
+    for key, stat in duration_stats.items():
+        stat["avg_score"] = round(stat["total_score"] / stat["count"], 2) if stat["count"] else 0
+        stat["avg_time_taken"] = round(sum(stat["times"]) / len(stat["times"]), 2) if stat["times"] else None
+        del stat["total_score"]
+        del stat["times"]
+
     # --- PAR PÉRIODE ---
     now = datetime.utcnow()
     periods = {
@@ -730,6 +763,19 @@ def get_profile_stats(user_id):
         g = next((game for game in games if game.id == s.game_id), None)
         if not g:
             continue
+        # Détermination de la durée
+        if g.length == 5:
+            duration = "short"
+            total_points_affiche = s.total_points
+        elif g.length == 10:
+            duration = "medium"
+            total_points_affiche = round(s.total_points * 500 / 1000, 2)
+        elif g.length == 15:
+            duration = "long"
+            total_points_affiche = round(s.total_points * 500 / 1500, 2)
+        else:
+            duration = str(g.length)
+            total_points_affiche = s.total_points
         # Récupère toutes les catégories jouées dans la partie
         rounds_in_game = [r for r in rounds if r.game_id == g.id]
         categories_in_game = set()
@@ -739,8 +785,9 @@ def get_profile_stats(user_id):
             categories_in_game.add(category.name)
         games_array.append({
             "game_id": s.game_id,
-            "total_points": s.total_points,
+            "total_points": total_points_affiche,
             "avg_time_taken": avg_time_taken_per_game.get(s.game_id),
+            "duration": duration,
             "categories": list(categories_in_game),
             "difficulty": g.difficulty.value if hasattr(g, "difficulty") else None,
             "started_at": g.started_at.isoformat() if g.started_at else None,
@@ -775,6 +822,7 @@ def get_profile_stats(user_id):
         "category_stats": category_stats,
         "total_words": total_words,
         "period_stats": period_stats,
+        "duration_stats": duration_stats, 
         "games": games_array,
         "top_words": [{"word": w, "avg_score_per_drawing": s} for w, s in top_5_words],
         "flop_words": [{"word": w, "avg_score_per_drawing": s} for w, s in flop_5_words],
