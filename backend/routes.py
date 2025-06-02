@@ -782,11 +782,19 @@ def get_profile_stats(user_id):
 
 @api_blueprint.route("/general-stats", methods=["GET"])
 def get_general_stats():
-    # Leaderboard top 10
+    """
+    Renvoie les statistiques globales nécessaires au dashboard :
+      - leaderboard (top 10 utilisateurs, somme des points ET meilleur score sur une partie)
+      - avg_points_per_drawing (moyenne des points par dessin)
+      - avg_points_per_category (moyenne des points par catégorie)
+      - games_per_category (nombre de parties jouées par catégorie)
+    """
+    # ─── 1) Leaderboard top 10 (sum et max de Score.total_points) ───
     leaderboard = (
         db.session.query(
             User.username,
-            func.sum(Score.total_points).label("total_points")
+            func.sum(Score.total_points).label("sum_points"),
+            func.max(Score.total_points).label("max_points")
         )
         .join(Score, Score.user_id == User.id)
         .group_by(User.id)
@@ -794,15 +802,20 @@ def get_general_stats():
         .limit(10)
         .all()
     )
+
     leaderboard_data = [
-        {"username": row.username, "total_points": row.total_points}
+        {
+            "username": row.username,
+            "sum_points": int(row.sum_points or 0),
+            "max_points": int(row.max_points or 0)
+        }
         for row in leaderboard
     ]
 
-    # Difficultés disponibles
+    # ─── 2) Difficultés disponibles (non utilisé côté front ici) ───
     difficulties = [d.value for d in Difficulty]
 
-    # Moyenne de points par dessin (round)
+    # ─── 3) Moyenne de points par dessin (Round.score != NULL) ───
     avg_points_per_drawing = (
         db.session.query(func.avg(Round.score))
         .filter(Round.score != None)
@@ -810,7 +823,7 @@ def get_general_stats():
     )
     avg_points_per_drawing = round(avg_points_per_drawing, 2) if avg_points_per_drawing else 0
 
-    # Moyenne de points par catégorie
+    # ─── 4) Moyenne de points par catégorie ───
     category_scores = (
         db.session.query(
             Category.name,
@@ -823,14 +836,34 @@ def get_general_stats():
         .all()
     )
     avg_points_per_category = {
-        name: round(avg, 2) if avg else 0 for name, avg in category_scores
+        name: round(avg_score, 2) if avg_score else 0
+        for name, avg_score in category_scores
     }
+
+    # ─── 5) Nombre de parties jouées par catégorie ───
+    # On considère qu'une partie « appartient » à une catégorie si au moins un round
+    # de cette partie a été joué sur un mot de cette catégorie.
+    rounds_with_scores = (
+        db.session.query(Round.game_id, Category.name)
+        .join(Word, Round.word_id == Word.id)
+        .join(Category, Word.category_id == Category.id)
+        .filter(Round.score != None)
+        .all()
+    )
+    cat_to_game_ids: dict[str, set[int]] = {}
+    for game_id, cat_name in rounds_with_scores:
+        if cat_name not in cat_to_game_ids:
+            cat_to_game_ids[cat_name] = set()
+        cat_to_game_ids[cat_name].add(game_id)
+
+    games_per_category = {cat: len(game_ids) for cat, game_ids in cat_to_game_ids.items()}
 
     return jsonify({
         "leaderboard": leaderboard_data,
         "difficulties": difficulties,
         "avg_points_per_drawing": avg_points_per_drawing,
         "avg_points_per_category": avg_points_per_category,
+        "games_per_category": games_per_category
     })
 
 @api_blueprint.route("/change-password", methods=["POST"])
