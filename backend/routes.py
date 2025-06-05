@@ -846,7 +846,7 @@ def get_general_stats():
         )
         .join(Score, Score.user_id == User.id)
         .group_by(User.id)
-        .order_by(func.sum(Score.total_points).desc())
+        .order_by(func.max(Score.total_points).desc())
         .limit(10)
         .all()
     )
